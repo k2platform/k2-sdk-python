@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OfflineConfigCache`): AES-256-GCM encrypted, HMAC-SHA256 sealed, TTL-bounded,
   keys derived from the SDK token (token rotation invalidates snapshots). On-disk
   `K2C1` format is byte-compatible with the Java and Node SDKs. Honors the
-  server-driven `offlineCacheAllowed` paid-tier gate.
+  server-driven `offlineCacheAllowed` compatibility flag.
 - `K2Configuration` typed accessors: `get_string` / `get_int` / `get_float` /
   `get_bool` / `has` / `to_dict`.
 - `K2Error` with `status_code` and `is_availability_error()`; auth/not-found/host

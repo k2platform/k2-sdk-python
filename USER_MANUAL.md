@@ -277,14 +277,15 @@ Snapshot files live at `<cache_dir>/config-<env>.json.enc`, one per
 environment. Writes are atomic (temp file + `os.replace`) and best-effort — a
 cache-write failure logs to stderr but never breaks your app.
 
-### Paid-tier gate (`offlineCacheAllowed`)
+### Compatibility flag (`offlineCacheAllowed`)
 
-The offline cache is a **Pro / Pro+** feature. The server signals eligibility
-in the config response via `offlineCacheAllowed`:
+The offline cache is available on **every tier** — current platform versions
+send `offlineCacheAllowed: true` on all tiers, including Free. The flag remains
+in the config response for compatibility with older platform builds:
 
-- `offlineCacheAllowed: false` (FREE tier) → the SDK **skips the disk write**
-  even if `offline_cache=True`. Live reads still work; there is simply no
-  local snapshot to fall back on.
+- `offlineCacheAllowed: false` (older platform build) → the SDK **skips the
+  disk write** even if `offline_cache=True`. Live reads still work; there is
+  simply no local snapshot to fall back on.
 - flag `true` or absent → the SDK honors your `offline_cache` setting
   (absent = back-compat with older servers).
 
@@ -347,7 +348,7 @@ Inject `K2_TOKEN` from a secret store — never bake it into the image.
 | `HTTP 404 … config not found` | Env or key doesn't exist | Check the environment name / property key. |
 | `HTTP 421 … rejected the request host` | `base_url` host ≠ platform `K2_PUBLIC_HOST` | Use the licensed public host in `base_url`. |
 | `status_code == -1` (transport) | DNS/connection/timeout/JSON error | Check network reachability and `request_timeout`. |
-| Offline fallback not kicking in | Cache disabled, FREE tier (`offlineCacheAllowed: false`), no prior successful fetch, or a non-availability error | Enable `offline_cache`, confirm a paid tier, ensure at least one prior good fetch; auth/404/421 never fall back. |
+| Offline fallback not kicking in | Cache disabled, an older platform build sending `offlineCacheAllowed: false`, no prior successful fetch, or a non-availability error | Enable `offline_cache`, ensure at least one prior good fetch; auth/404/421 never fall back. |
 | `[k2-sdk] offline snapshot … refusing` on stderr | Snapshot tampered, wrong token, past TTL, or truncated | Expected safety behavior — a fresh successful fetch rewrites it. |
 | Snapshot not read after token rotation | Snapshots are token-keyed | Expected — a new token invalidates old snapshots; the next good fetch rewrites them. |
 
