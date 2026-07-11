@@ -38,13 +38,12 @@ pool_size = k2.get_property("prod", "pool.size")   # single property
   `/properties/{key}`, authenticated with `Authorization: Bearer <token>` (and `X-API-Token`).
 - **TTL cache** (`cache_ttl_seconds`) so repeated reads don't hit the network each call; serves
   the last value through a failed refresh.
-- **Encrypted offline cache** (`offline_cache=True`, **Pro & Pro+**) — on a successful fetch the resolved config
-  is written to disk **AES-256-GCM-encrypted, HMAC-sealed, and TTL-bounded**, with keys derived
-  from the SDK token (rotating the token invalidates the snapshot). If the platform is
-  unreachable, the last-known-good snapshot is served instead of raising. Auth/not-found errors
-  (401/403/404/421) always surface. The on-disk format is byte-compatible with the Java and
-  Node SDK `K2C1` cache. On the FREE tier the server signals `offlineCacheAllowed: false` and
-  the SDK skips the cache write.
+- **Encrypted offline cache** (`offline_cache=True`, available on every tier) — on a successful
+  fetch the resolved config is written to disk **AES-256-GCM-encrypted, HMAC-sealed, and
+  TTL-bounded**, with keys derived from the SDK token (rotating the token invalidates the
+  snapshot). If the platform is unreachable, the last-known-good snapshot is served instead of
+  raising. Auth/not-found errors (401/403/404/421) always surface. The on-disk format is
+  byte-compatible with the Java and Node SDK `K2C1` cache.
 
 ## Errors
 
