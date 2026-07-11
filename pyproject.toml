@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "keykosh-sdk"
+version = "1.0.0"
+description = "Client SDK for reading configuration from a self-hosted KeyKosh (K2) platform — token-scoped reads, TTL cache, and an encrypted offline last-known-good cache."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "KeyKosh" }]
+keywords = ["keykosh", "k2", "configuration", "config", "self-hosted", "secrets", "feature-flags"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "cryptography>=41.0",
+]
+
+# Dev-only extras — NOT runtime dependencies. `pip install keykosh-sdk[dev]`
+# gives contributors the test + build + publish toolchain in one step.
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "build>=1.0",
+  "twine>=5.0",
+]
+# Cloud-only: needed only for the K2_TOKEN_ENC KMS-envelope credential (§1b). `pip install keykosh-sdk[aws]`
+aws = [
+  "boto3>=1.28",
+]
+
+[project.urls]
+Homepage = "https://keykosh.com"
+Documentation = "https://github.com/k2platform/k2-sdk-python/blob/main/USER_MANUAL.md"
+Repository = "https://github.com/k2platform/k2-sdk-python"
+Changelog = "https://github.com/k2platform/k2-sdk-python/blob/main/CHANGELOG.md"
+Issues = "https://github.com/k2platform/k2-sdk-python/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/keykosh"]
