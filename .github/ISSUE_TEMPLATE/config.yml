@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a bug in the Python SDK
+    url: https://github.com/k2platform/k2support/issues/new/choose
+    about: All KeyKosh issues are tracked in one place — k2platform/k2support.
+  - name: Security vulnerability
+    url: https://github.com/k2platform/k2support/security/advisories/new
+    about: Report privately. Never open a public issue for a vulnerability.
+  - name: Questions and "how do I..."
+    url: https://github.com/k2platform/k2support/discussions
+    about: Ask in Discussions on the support repository.
+  - name: License keys, activation, billing
+    url: mailto:support@keykosh.com
+    about: Handled privately by email.
+  - name: Documentation
+    url: https://keykosh.com/docs/
+    about: Install runbook, configuration reference, and SDK guides.
