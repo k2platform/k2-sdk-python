@@ -1,8 +1,8 @@
 # KeyKosh Python SDK — User Manual
 
 `keykosh-sdk` reads token-scoped configuration from **your own self-hosted
-KeyKosh (K2) platform**. It has a single runtime dependency (`cryptography`);
-all HTTP is done with the Python standard library. Python 3.9+.
+KeyKosh (K2) platform**. It has **zero runtime dependencies** — HTTP, crypto and
+JSON all come from the Python standard library. Python 3.9+.
 
 The SDK talks to **exactly one host — the platform you point it at**. There is
 no vendor default URL and no callback home: `base_url` is required and the SDK
@@ -23,9 +23,33 @@ never phones anywhere else.
 5. [Configuration reference](#5-configuration-reference)
 6. [Reading values (`K2Configuration`)](#6-reading-values-k2configuration)
 7. [Error handling](#7-error-handling)
-8. [Offline / last-known-good behavior](#8-offline--last-known-good-behavior)
-9. [Environment variables & Docker](#9-environment-variables--docker)
-10. [Troubleshooting](#10-troubleshooting)
+8. [Offline behavior and the local config file](#8-offline-behavior-and-the-local-config-file)
+9. [Hot reload](#9-hot-reload)
+10. [Environment variables & Docker](#10-environment-variables--docker)
+11. [Troubleshooting](#11-troubleshooting)
+
+---
+
+## 0. The two ways to run
+
+Almost everything in this manual follows from which of these you are, so start here.
+
+| | **Production** — app + SDK in a container | **Development** — your laptop |
+|---|---|---|
+| Setting | `K2_OFFLINE=false` (the default) | `K2_OFFLINE=true` |
+| Source of truth | the platform | `k2config-<env>.json` |
+| Who edits config | the K2 admin UI, only | you, in the file |
+| Who writes the file | the **SDK**, on every successful fetch | **you** |
+| Network | fetches; falls back to the file when the platform is unreachable | none, ever |
+
+> **`K2_OFFLINE=false` does not mean "no offline support".** It is the setting that *gives*
+> you the offline fallback: the SDK keeps a local file current so a K2 outage cannot stop your
+> app from booting. `K2_OFFLINE=true` means "never contact the server" — a different thing.
+
+A third combination exists for short-lived jobs that must leave nothing on disk:
+`K2_OFFLINE=false` with `K2_OFFLINE_CACHE=false` — the platform is the only source and no file
+is written. (`K2_OFFLINE=true` with `K2_OFFLINE_CACHE=false` is contradictory and raises
+`K2_INVALID_MODE` at construction.)
 
 ---
 
@@ -35,8 +59,9 @@ never phones anywhere else.
 pip install keykosh-sdk
 ```
 
-Requires Python 3.9 or newer. The only runtime dependency, `cryptography`, is
-pulled in automatically.
+Requires Python 3.9 or newer, and nothing else — the SDK has no runtime
+dependencies. (`cryptography` was required before 1.1.0, solely for the retired
+encrypted `K2C1` cache format; the local config file is now plaintext JSON.)
 
 To install for local development (tests + build + publish tooling):
 
@@ -57,10 +82,10 @@ k2 = create_client(
     token="k2_live_xxxxxxxx",
     env="prod",
     cache_ttl_seconds=30,     # optional in-memory TTL cache
-    offline_cache=True,       # optional encrypted last-known-good fallback
 )
 
-# Full config for the default environment
+# Full config for the default environment. This also writes the local
+# k2config-prod.json that will be served if the platform is later unreachable.
 cfg = k2.get_configuration()
 db_url  = cfg.get_string("db.url", "postgresql://localhost/app")
 debug   = cfg.get_bool("feature.debug", False)
@@ -68,6 +93,9 @@ pool    = cfg.get_int("pool.size", 10)
 
 # A single property (explicit environment + key)
 pool_size = k2.get_property("prod", "pool.size")
+
+# Live updates — fires whenever an admin changes this environment's config.
+unsubscribe = k2.watch("prod", lambda fresh: apply_config(fresh))
 ```
 
 ---
@@ -159,24 +187,29 @@ All options are constructor arguments of `K2Client` (and therefore of
 | `token` | `str` | — (**required**) | SDK token used as `Authorization: Bearer` and `X-API-Token`. Empty raises `K2Error`. Env: `K2_TOKEN`. |
 | `env` | `str \| None` | `None` | Default environment for the no-arg reads. If unset, no-arg reads raise `K2Error`. Env: `K2_ENV`. |
 | `request_timeout` | `float` | `10.0` | Per-request HTTP timeout in **seconds**. |
-| `cache_ttl_seconds` | `float \| None` | `None` | In-memory TTL (seconds) for `get_cached_configuration()`. `None`/`<=0` disables it. |
-| `offline_cache` | `bool \| OfflineConfigCache \| None` | `None` | `True` enables the default encrypted disk cache; pass an `OfflineConfigCache` instance to customize dir/TTL; `None`/`False` disables it. See §8. |
-
-### Offline cache options (`OfflineConfigCache`)
-
-| Option | Type | Default | Meaning |
-|---|---|---|---|
-| `cache_dir` | `str \| None` | `~/.k2/cache` (or `$K2_CACHE_DIR`) | Directory for encrypted snapshots (one file per environment). |
-| `ttl_millis` | `int` | `86_400_000` (24 h) | On-disk snapshot TTL in **milliseconds**. `0` = no expiry. |
+| `cache_ttl_seconds` | `float \| None` | `None` | In-memory TTL (seconds) for `get_cached_configuration()`, and the `watch()` polling interval when the change stream is unavailable. `None`/`<=0` disables the TTL cache. |
+| `app` | `str \| None` | `None` | App slug. Optional — the SDK doesn't need it to *find* the local file, only to *validate* it. Set it anyway (see §8). Env: `K2_APP`. |
+| `org` | `str \| None` | `None` | Org slug; stamped into the file's `_k2.org`. Env: `K2_ORG`. |
+| `offline` | `bool` | `False` | `True` ⇒ never contact the server; the local file is the source of truth. Env: `K2_OFFLINE`. |
+| `offline_cache` | `bool` | `True` | Keep a local `k2config-<env>.json` at all. `False` ⇒ nothing is written to disk. Env: `K2_OFFLINE_CACHE`. |
+| `hot_reload` | `bool \| None` | `True` when online | Whether `watch()` subscribes to the change stream. `False` ⇒ it polls instead. Env: `K2_HOT_RELOAD`. |
+| `config_dir` | `str \| None` | `~/.k2/config` | Directory holding `k2config-<env>.json`. Env: `K2_CONFIG_DIR`. |
+| `config_file` | `str \| None` | `None` | One exact path — wins over every other candidate. Env: `K2_CONFIG_FILE`. |
+| `offline_max_age` | `str \| float \| None` | `None` | e.g. `"7d"`. Hard-refuse a file older than this. Unset ⇒ no limit. Env: `K2_OFFLINE_MAX_AGE`. |
+| `token_enc` | `str \| None` | `None` | KMS-encrypted token ciphertext, decrypted at first use. Env: `K2_TOKEN_ENC`. |
+| `sts` | `bool` | `False` | Authenticate with an AWS STS workload identity instead of a token. Org-scoped, so `app` is required. Env: `K2_STS_ENABLED`. |
+| `logger` | `Callable[[str], None] \| None` | writes to `stderr` | Where the SDK's INFO/WARN lines go. |
 
 ```python
-from keykosh import K2Client, OfflineConfigCache
+from keykosh import K2Client
 
 k2 = K2Client(
     base_url="https://k2.acme.com",
     token="k2_live_xxxxxxxx",
     env="prod",
-    offline_cache=OfflineConfigCache(cache_dir="/var/lib/myapp/k2", ttl_millis=6 * 60 * 60 * 1000),
+    app="billing",
+    config_dir="/var/lib/myapp/k2",   # one directory per app
+    offline_max_age="7d",             # optional hard staleness limit
 )
 ```
 
@@ -214,87 +247,249 @@ Every failure raises a single exception type, `K2Error` (importable from
 `keykosh`):
 
 ```python
-from keykosh import create_client, K2Error
+from keykosh import create_client, K2Error, K2ErrorCode
 
 k2 = create_client(base_url="https://k2.acme.com", token="k2_live_xxxx", env="prod")
 try:
     cfg = k2.get_configuration()
 except K2Error as e:
-    print(e)                       # human-readable message
-    print(e.status_code)           # HTTP status, or -1 for transport/config errors
-    if e.is_availability_error():  # transport failure or 5xx
-        ...  # platform down / unreachable — safe to retry or degrade
+    print(e.code)                  # a stable K2ErrorCode — branch on this
+    print(e)                       # the message: what was tried, what happened, what to do
+    if e.code == K2ErrorCode.MISSING_TOKEN:
+        ...
+    if e.is_availability_error():  # unreachable / timeout / 5xx
+        ...  # platform down — safe to retry or degrade
     else:
-        ...  # auth/not-found/host errors — a config or permission problem
+        ...  # config / file / auth — a real problem to fix
 ```
 
 `K2Error` attributes:
 
 | Attribute / method | Meaning |
 |---|---|
-| `str(err)` / `err.args[0]` | the message |
-| `err.status_code` | HTTP status from the platform, or `-1` for transport/config errors |
+| `err.code` | a stable `K2ErrorCode` — greppable, and unchanged when messages are reworded. **Branch on this, not on the message.** |
+| `str(err)` | the message |
+| `err.status_code` | HTTP status from the platform, or `-1` for transport/config/file errors |
 | `err.__cause__` | the underlying exception, when chained |
-| `err.is_availability_error()` | `True` for `status_code == -1` or `>= 500` — these are eligible for offline-cache fallback |
+| `err.is_availability_error()` | `True` only for `K2_UNREACHABLE`, `K2_TIMEOUT` and `K2_SERVER_ERROR` — the codes eligible for the local file |
 
-Status codes you may see:
+### The codes
 
-| Code | Meaning | Availability error? |
+**Config** — a misconfiguration. Raised when the client is **constructed**, so a bad
+deployment fails immediately rather than an hour later on the first read.
+
+| Code | Meaning |
+|---|---|
+| `K2_MISSING_BASE_URL` | no `base_url` and no `K2_BASE_URL` (and not `offline`) |
+| `K2_MISSING_TOKEN` | no `token`, `token_enc` or `sts` credential |
+| `K2_INVALID_MODE` | `offline=True` with `offline_cache=False` — contradictory |
+| `K2_MISSING_ENV` | no environment passed and no `K2_ENV`. **Raised on read, not construction** — one client can legitimately serve several environments via `get_configuration(env)`, so requiring a default up front would break that API. |
+
+**File** — something about the local `k2config-<env>.json`. None of these fall back to the
+server: a broken or foreign file is a bug to fix, not an outage to route around.
+
+| Code | Meaning |
+|---|---|
+| `K2_FILE_NOT_FOUND` | `offline=True` and no file exists; the message lists every path searched |
+| `K2_FILE_MALFORMED` | not valid JSON, or no `properties` object |
+| `K2_FILE_APP_MISMATCH` | the file's `_k2.app` is a different app — see §8 |
+| `K2_FILE_STALE` | older than `offline_max_age` |
+| `K2_FILE_UNMANAGED` | `_k2.managed` is not `true`, so you own the file and the SDK refused to overwrite it |
+| `K2_FILE_NOT_WRITABLE` | the directory isn't writable. Logged **once** at WARN and suppressed — never raised |
+
+**Auth** — the platform is reachable and refusing. A valid file on disk is deliberately
+**declined**, because an auth failure is not an outage; the message says so.
+
+| Code | `status_code` | Meaning |
 |---|---|---|
-| `-1` | Transport/config error (bad URL, DNS, connection refused, timeout, JSON parse) | Yes |
-| `401` / `403` | Token rejected — wrong token or wrong environment scope | No |
-| `404` | Config not found for that env/key | No |
-| `421` | Host not licensed — `base_url` host does not match the platform's `K2_PUBLIC_HOST` | No |
-| `5xx` | Platform-side error | Yes |
+| `K2_UNAUTHORIZED` | 401 | token rejected — bad or expired |
+| `K2_FORBIDDEN` | 403 | token has no access to that environment |
+| `K2_NOT_FOUND` | 404 | no config for that environment/key |
+| `K2_HOST_NOT_LICENSED` | 421 | `base_url` host doesn't match the platform's licensed host (`K2_PUBLIC_HOST`) |
+| `K2_REQUEST_FAILED` | other 4xx | an unexpected non-2xx; reachable and refusing, so still no fallback |
 
-Auth/not-found/host errors (`401/403/404/421`) **always surface** — they are
-never masked by the offline cache, because a stale snapshot would hide a real
-misconfiguration.
+**Availability** — the platform could not be reached. These, and only these, serve the local
+file when one is present.
 
----
+| Code | `status_code` | Meaning |
+|---|---|---|
+| `K2_UNREACHABLE` | `-1` | DNS failure, connection refused, bad `base_url` |
+| `K2_TIMEOUT` | `-1` | exceeded `request_timeout` |
+| `K2_SERVER_ERROR` | 5xx | platform-side failure, or an unparseable response |
 
-## 8. Offline / last-known-good behavior
-
-When `offline_cache` is enabled, a **successful** `get_configuration()` writes
-the resolved property map to disk. If a later fetch fails with an
-**availability error** (transport failure or 5xx), the SDK serves the
-last-known-good snapshot instead of raising — your app keeps its most recent
-good config through a platform outage.
-
-At rest each snapshot is:
-
-- **AES-256-GCM encrypted** — secret values are never on disk in plaintext.
-- **HMAC-SHA256 sealed** — tampering is detected and the file is refused.
-- **TTL-bounded** — a snapshot past `ttl_millis` (default 24 h) is refused as stale.
-- **Token-keyed** — both keys are derived from the SDK token, so **rotating the
-  token invalidates every existing snapshot**, and a file written under one
-  token is unreadable under another.
-
-The on-disk `K2C1` format is **byte-compatible with the Java and Node SDKs** —
-a snapshot written by one can be read by the others (given the same token).
-
-Snapshot files live at `<cache_dir>/config-<env>.json.enc`, one per
-environment. Writes are atomic (temp file + `os.replace`) and best-effort — a
-cache-write failure logs to stderr but never breaks your app.
-
-### Compatibility flag (`offlineCacheAllowed`)
-
-The offline cache is available on **every tier** — current platform versions
-send `offlineCacheAllowed: true` on all tiers, including Free. The flag remains
-in the config response for compatibility with older platform builds:
-
-- `offlineCacheAllowed: false` (older platform build) → the SDK **skips the
-  disk write** even if `offline_cache=True`. Live reads still work; there is
-  simply no local snapshot to fall back on.
-- flag `true` or absent → the SDK honors your `offline_cache` setting
-  (absent = back-compat with older servers).
-
-No client change is needed to move between tiers; the behavior follows the
-server signal automatically.
+If the platform is unreachable **and** a file exists but cannot be used, you get the *file's*
+code (`K2_FILE_APP_MISMATCH`, `K2_FILE_STALE`, …) with the outage noted in the message — the
+specific diagnosis, not a generic "unreachable".
 
 ---
 
-## 9. Environment variables & Docker
+## 8. Offline behavior and the local config file
+
+One plaintext file per environment, serving both personas from §0:
+
+```json
+{
+  "_k2": {
+    "org": "acme",
+    "app": "billing",
+    "env": "prod",
+    "managed": true,
+    "fetchedAt": "2026-08-03T18:04:11Z",
+    "sdk": "python/1.1.0"
+  },
+  "properties": {
+    "db.url": "postgresql://localhost:5432/billing",
+    "db.pool": 20,
+    "feature.x": true
+  }
+}
+```
+
+`properties` is nested under its own key so a config key literally named `_k2` can't collide
+with the header. Files are written mode `0600` in a `0700` directory, via temp file +
+`os.replace`, so a concurrent reader sees the old file or the new one — never a partial one.
+
+### Where it lives
+
+First hit wins:
+
+```
+$K2_CONFIG_FILE                     exact path — and nothing else is consulted
+./k2config-<env>.json               repo-local — the dev case
+$K2_CONFIG_DIR/k2config-<env>.json  or, when unset, ~/.k2/config/k2config-<env>.json
+```
+
+**Naming an explicit location is exclusive.** `K2_CONFIG_FILE` means *that* file alone;
+setting `K2_CONFIG_DIR` replaces the `~/.k2/config` default rather than preceding it. A stale
+file in your home directory must never quietly satisfy a read that should have failed loudly.
+The repo-local path stays in the chain either way, because a repo is per-app and so can never
+hold a foreign app's file.
+
+The SDK never *creates* a repo-local file — that is your deliberate `cp` (see below).
+
+### Why the app name is inside the file, not in its name
+
+- **`K2_APP` stays optional** — the SDK doesn't need it to *locate* the file, only to
+  *validate* it.
+- **One predictable string** to document and gitignore: `k2config-*.json`.
+- **A collision becomes detectable.** Two apps sharing a config directory both write
+  `k2config-prod.json`; the second overwrites the first. The loser then reads a file whose
+  `_k2.app` doesn't match and fails with `K2_FILE_APP_MISMATCH` **naming both apps and the
+  fix**, instead of silently serving the wrong app's config.
+
+> The collision is *diagnosable*, not *eliminated* — the filename still has no app segment.
+> The fix is one `K2_CONFIG_DIR` per app, or a repo-local file per repo.
+
+**Set `K2_APP` even though it is optional.** With `K2_OFFLINE=true` and no `K2_APP` the SDK
+has nothing to validate against — it never contacts the server, so it cannot know which app it
+*should* be, and will trust whatever the file says. Setting `K2_APP` turns that into a checked
+invariant from the very first cold read. (When online, the SDK remembers the app the server
+resolved and validates against that.)
+
+### Secrets
+
+**The file is plaintext, and on the token read path it holds secret values in clear.** This is
+deliberate: production's file is machine-written and never opened, and a developer's holds test
+values. It also means an AWS STS workload identity — which has no static token — can keep an
+offline file, which the old token-derived encryption made impossible.
+
+> **Add `k2config-*.json` to your `.gitignore`.** Commit one only when it holds no real
+> secrets.
+
+### Staleness
+
+There is **no hard TTL by default**. Refusing to boot during an outage is a worse failure than
+booting slightly stale config, especially now that hot reload keeps the file current. Every
+file-served read logs a WARN carrying the file's age. If you want a hard limit, set
+`offline_max_age` / `K2_OFFLINE_MAX_AGE` (e.g. `"7d"`) and an older file is refused with
+`K2_FILE_STALE`.
+
+### Read-only filesystems
+
+`readOnlyRootFilesystem: true` is common in hardened Docker and Kubernetes, and `~/.k2/config`
+will not be writable there. A failed write is logged **once** at WARN as `K2_FILE_NOT_WRITABLE`
+— naming the path and suggesting a mounted volume or `K2_OFFLINE_CACHE=false` — and then
+suppressed. It is never retried per-fetch and never raised. The app runs normally with no
+offline fallback, which is exactly what the operator chose.
+
+### Taking ownership of a file (the dev workflow)
+
+No CLI is involved: the SDK is the generator.
+
+```bash
+# 1. Run once online — the SDK writes the file as a side effect of the first fetch.
+K2_BASE_URL=https://k2.acme.com K2_TOKEN=… K2_ENV=dev python app.py
+
+# 2. Move it into the repo (repo-local wins the resolution order).
+cp ~/.k2/config/k2config-dev.json ./k2config-dev.json
+#    then edit "_k2": { "managed": false } and change values freely
+
+# 3. From now on, no server.
+K2_OFFLINE=true python app.py
+```
+
+`_k2.managed` is the ownership guard. It is present only on SDK-written files; set it to
+`false` and the SDK **refuses to write** that file, raising `K2_FILE_UNMANAGED` instead. That
+is what makes "my hand-edits vanished" impossible.
+
+### Using `K2ConfigStore` directly
+
+The file store is exported if you need to inspect or pre-seed a file yourself:
+
+```python
+from keykosh import K2ConfigStore
+
+store = K2ConfigStore(dir="/etc/myapp")
+store.candidates("prod")                      # every path searched, in order
+store.resolve("prod")                         # the one that exists, or None
+hit = store.load("prod", app="billing")       # raises K2_FILE_* on a bad file
+store.save("prod", {"db.url": "…"}, app="billing")
+```
+
+---
+
+## 9. Hot reload
+
+`watch(environment=None, handler=…)` calls `handler(config)` whenever the platform reports a
+change to that environment, and returns an unsubscribe callable.
+
+```python
+k2 = create_client(base_url="https://k2.acme.com", token=os.environ["K2_TOKEN"])
+
+def on_change(cfg):
+    pool.resize(cfg.get_int("pool.size", 10))
+    flags.replace(cfg.to_dict())
+
+unsubscribe = k2.watch("prod", on_change)
+...
+unsubscribe()
+```
+
+The subscription runs on a **daemon thread**, so it never keeps your process alive on its own.
+
+**Transport is Server-Sent Events** over `urllib` — no new dependency, and it survives ALBs and
+proxies that would block a WebSocket. The stream carries a **signal, not values**: on
+`config.changed` the SDK re-fetches `/current`. That keeps secrets off a long-lived connection,
+exercises the authorization path on every update, and means a client that missed events while
+disconnected self-heals on reconnect with a full fetch.
+
+Each push also **rewrites the local config file**, so the snapshot you would fall back to
+during an outage is the one hot reload last delivered.
+
+**It degrades rather than fails.** A dropped connection reconnects with backoff. If the stream
+is unavailable entirely — an older platform that has no `/stream` endpoint, or a proxy that
+strips SSE — `watch()` logs that once and **falls back to polling** on `cache_ttl_seconds`.
+Your app still gets updates; they just arrive on the poll interval. Pass `hot_reload=False` to
+choose polling outright.
+
+With `offline=True` no stream is opened at all: there is no server to subscribe to.
+
+> **Server requirement:** the change stream needs a platform built on or after 2026-08-03.
+> Against an older one the endpoint 404s and the SDK polls — no error, no upgrade required.
+
+---
+
+## 10. Environment variables & Docker
 
 The SDK reads these environment variables (kwargs always override):
 
@@ -302,8 +497,24 @@ The SDK reads these environment variables (kwargs always override):
 |---|---|---|
 | `K2_BASE_URL` | Platform URL (`https://k2.acme.com`) | — (required unless passed) |
 | `K2_TOKEN` | SDK token — the one secret; never commit it | — (required unless passed) |
+| `K2_TOKEN_ENC` | KMS-encrypted token ciphertext, decrypted at first use | — |
 | `K2_ENV` | Default environment for no-arg reads | — |
-| `K2_CACHE_DIR` | Offline cache directory | `~/.k2/cache` |
+| `K2_ORG` / `K2_APP` | Org and app slugs | — |
+| `K2_OFFLINE` | `true` ⇒ never contact the server | `false` |
+| `K2_OFFLINE_CACHE` | `false` ⇒ keep nothing on disk | `true` |
+| `K2_HOT_RELOAD` | `false` ⇒ `watch()` polls instead of subscribing | on when online |
+| `K2_CONFIG_DIR` | Directory holding `k2config-<env>.json` | `~/.k2/config` |
+| `K2_CONFIG_FILE` | One exact path — wins over everything else | — |
+| `K2_OFFLINE_MAX_AGE` | e.g. `7d` — hard-refuse an older file | no limit |
+| `K2_CACHE_TTL` | In-memory TTL / `watch()` poll interval | — |
+| `K2_STS_ENABLED` | `true` ⇒ authenticate with an AWS STS workload identity | `false` |
+
+**Deprecated, honored for one minor release** (each logs a WARN on use):
+
+| Old | New | Mapping |
+|---|---|---|
+| `K2_SOURCE` | `K2_OFFLINE` | `file`→`true`, `server`→`false`, `auto`→`true` iff a file exists for the env |
+| `K2_CACHE_DIR` | `K2_CONFIG_DIR` | direct |
 
 ### Docker / 12-factor
 
@@ -328,32 +539,63 @@ docker run --rm \
   -e K2_BASE_URL=https://k2.acme.com \
   -e K2_TOKEN="$K2_TOKEN" \
   -e K2_ENV=prod \
+  -e K2_APP=billing \
+  -e K2_CONFIG_DIR=/var/lib/k2 \
+  -v k2config:/var/lib/k2 \
   myapp
 ```
 
-For the offline cache to survive container restarts, mount a volume and point
-`K2_CACHE_DIR` at it (e.g. `-e K2_CACHE_DIR=/data/k2 -v k2cache:/data/k2`).
-Inject `K2_TOKEN` from a secret store — never bake it into the image.
+Notes:
+
+- **Never bake the token into the image** — inject `K2_TOKEN` at runtime (env, Docker secret,
+  or your orchestrator's secret store).
+- To make the offline file survive container restarts, mount a **volume** at
+  `K2_CONFIG_DIR`. Without a persistent mount, each new container starts with no
+  last-known-good config and a platform outage at boot has nothing to fall back to.
+- **One `K2_CONFIG_DIR` per app.** If two apps share a mounted volume they will overwrite
+  each other's `k2config-<env>.json`; with `K2_APP` set, the loser fails loudly with
+  `K2_FILE_APP_MISMATCH` rather than serving the wrong config.
+- If the container runs with a **read-only root filesystem**, either mount a writable volume
+  at `K2_CONFIG_DIR` or set `K2_OFFLINE_CACHE=false` to opt out and silence the warning.
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
-| Symptom | Likely cause | Fix |
+Every row is keyed by the error `code`, which is stable — match on that rather than on message
+text.
+
+| Code / symptom | Likely cause | Fix |
 |---|---|---|
-| `K2Error: K2 base_url is required` | `base_url`/`K2_BASE_URL` empty | Set the platform URL. |
-| `K2Error: K2 token is required` | `token`/`K2_TOKEN` empty | Mint a token in the admin UI (Tokens tab). |
-| `K2Error: No default environment configured` | No-arg read without `env` | Pass `env=...` or call with an explicit environment. |
-| `HTTP 401/403 … token rejected` | Wrong token, or token not scoped to that env | Verify the token and its environment scope. |
-| `HTTP 404 … config not found` | Env or key doesn't exist | Check the environment name / property key. |
-| `HTTP 421 … rejected the request host` | `base_url` host ≠ platform `K2_PUBLIC_HOST` | Use the licensed public host in `base_url`. |
-| `status_code == -1` (transport) | DNS/connection/timeout/JSON error | Check network reachability and `request_timeout`. |
-| Offline fallback not kicking in | Cache disabled, an older platform build sending `offlineCacheAllowed: false`, no prior successful fetch, or a non-availability error | Enable `offline_cache`, ensure at least one prior good fetch; auth/404/421 never fall back. |
-| `[k2-sdk] offline snapshot … refusing` on stderr | Snapshot tampered, wrong token, past TTL, or truncated | Expected safety behavior — a fresh successful fetch rewrites it. |
-| Snapshot not read after token rotation | Snapshots are token-keyed | Expected — a new token invalidates old snapshots; the next good fetch rewrites them. |
+| `K2_MISSING_BASE_URL` at construction | `base_url`/`K2_BASE_URL` empty | Set the platform URL. (Not needed with `offline=True`.) |
+| `K2_MISSING_TOKEN` at construction | `token`/`K2_TOKEN` empty | Mint a token in the admin UI → Tokens. |
+| `K2_INVALID_MODE` at construction | `offline=True` with `offline_cache=False` | Contradictory — offline mode *needs* a file. Drop one of the two. |
+| `K2_MISSING_ENV` on a read | No-arg read without `env` | Pass `env=…`, or call with an explicit environment. |
+| `K2_UNAUTHORIZED` / `K2_FORBIDDEN` | Wrong token, or the token isn't scoped to that env | Verify the token and its environment scope. |
+| `K2_NOT_FOUND` | Env or key doesn't exist | Check the environment name / property key. |
+| `K2_HOST_NOT_LICENSED` | `base_url` host ≠ the platform's `K2_PUBLIC_HOST` | Use the licensed public host in `base_url`. |
+| `K2_TIMEOUT` / `K2_UNREACHABLE` | DNS/connection failure, or slower than `request_timeout` | Check network reachability; raise `request_timeout`. With a local file present these do not raise at all. |
+| The local file was never used during an outage | No prior successful fetch, `offline_cache=False`, or the failure wasn't an availability error | Confirm one successful fetch wrote the file; remember auth failures deliberately never fall back. |
+| `K2_FILE_NOT_FOUND` with `offline=True` | No file at any candidate path — the message lists them all | Run once with `K2_OFFLINE=false` to have the SDK write it (§8). |
+| `K2_FILE_APP_MISMATCH` | Two apps sharing one config directory; the other wrote last | Give each app its own `K2_CONFIG_DIR`, or keep the file in each repo. |
+| `K2_FILE_UNMANAGED` on write | The file's `_k2.managed` is not `true`, so you own it | Intended — it protects your hand-edits. Set `K2_OFFLINE=true` to read-only it, or set `managed` back to `true`. |
+| `K2_FILE_STALE` | Older than `offline_max_age` | Refresh it with one online run, or raise/unset the limit. |
+| `K2_FILE_NOT_WRITABLE` in the log (once) | Read-only filesystem or wrong permissions | Mount a writable volume at `K2_CONFIG_DIR`, or set `K2_OFFLINE_CACHE=false`. |
+| `hot reload … falling back to polling` in the log | The platform predates the change stream, or a proxy strips SSE | Harmless — updates arrive on `cache_ttl_seconds` instead. |
+
+### Inspecting the file
+
+It is plain JSON — read it directly:
+
+```bash
+cat ~/.k2/config/k2config-prod.json | jq '._k2'   # which app/env/when, and managed
+```
+
+Remember it holds secret values in clear on the token read path: keep it gitignored
+(`k2config-*.json`) and treat it like any other credential-bearing file.
 
 ### Verifying locally
 
 ```bash
-python -m pytest        # no-network smoke tests (crypto + parsing + validation)
+python tests/test_smoke.py   # no-network smoke tests (file store, errors, SSE)
 ```

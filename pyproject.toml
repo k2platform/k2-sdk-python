@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "keykosh-sdk"
-version = "1.0.0"
-description = "Client SDK for reading configuration from a self-hosted KeyKosh (K2) platform — token-scoped reads, TTL cache, and an encrypted offline last-known-good cache."
+version = "1.1.0"
+description = "Client SDK for reading configuration from a self-hosted KeyKosh (K2) platform — token-scoped reads, SSE hot reload, and a plaintext offline config file."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
@@ -26,9 +26,10 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = [
-  "cryptography>=41.0",
-]
+# Zero runtime dependencies. `cryptography` was here only for the K2C1 encrypted offline
+# cache; that format is retired (OFFLINE_AND_HOTRELOAD_DESIGN.md §9) and the local config
+# file is plaintext JSON, so the standard library now covers everything.
+dependencies = []
 
 # Dev-only extras — NOT runtime dependencies. `pip install keykosh-sdk[dev]`
 # gives contributors the test + build + publish toolchain in one step.

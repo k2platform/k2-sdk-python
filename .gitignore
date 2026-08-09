@@ -29,3 +29,6 @@ env/
 .idea/
 .vscode/
 RELEASING.md
+
+# Local SDK config files — plaintext, and hold secrets on the token read path
+k2config-*.json

@@ -16,11 +16,18 @@ class K2Configuration:
         self.environment = environment
         self.properties: dict[str, Any] = dict(properties or {})
         self.metadata: dict[str, Any] = dict(metadata or {})
+        self.organization: Optional[str] = None
+        self.application: Optional[str] = None
 
     @classmethod
     def from_response(cls, body: Mapping[str, Any]) -> "K2Configuration":
         body = body or {}
-        return cls(body.get("environment"), body.get("properties") or {}, body.get("metadata") or {})
+        cfg = cls(body.get("environment"), body.get("properties") or {}, body.get("metadata") or {})
+        # Carried through so the SDK can stamp the local file's `_k2.org`/`_k2.app` header from
+        # what the server actually resolved, rather than from what the caller guessed.
+        cfg.organization = body.get("organization")
+        cfg.application = body.get("application")
+        return cfg
 
     @classmethod
     def from_properties(cls, environment: Optional[str], properties: Mapping[str, Any]) -> "K2Configuration":
@@ -29,7 +36,7 @@ class K2Configuration:
     @classmethod
     def from_file(cls, organization: Optional[str], application: Optional[str],
                   environment: Optional[str], properties: Mapping[str, Any]) -> "K2Configuration":
-        """Configuration read from a local file source (§3b), carrying org/app coordinates."""
+        """Configuration read from the local ``k2config-<env>.json``, carrying its coordinates."""
         cfg = cls(environment, properties or {})
         cfg.organization = organization
         cfg.application = application
