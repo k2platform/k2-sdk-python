@@ -76,3 +76,23 @@ class K2Error(Exception):
         outage, so a valid file sitting on disk is deliberately declined.
         """
         return self.code in _AVAILABILITY_CODES
+
+    @property
+    def outage_detail(self) -> str:
+        """A short ``CODE: reason`` for logs, naming the underlying transport failure.
+
+        The degraded paths — serving the local file, or reporting that the file was
+        unusable — used to log the code alone. ``K2_UNREACHABLE`` covers a DNS failure, a
+        refused connection and a **TLS verification failure** alike, so the operator saw
+        "unreachable" for what was really an expired certificate or an internal CA missing
+        from the trust store, with nothing to tell them apart. That is a misconfiguration
+        wearing an outage's clothes.
+
+        Falls back to the bare code when there is no cause to name (a 5xx, say).
+        """
+        cause = self.__cause__
+        if cause is None or isinstance(cause, K2Error):
+            return self.code
+        reason = getattr(cause, "reason", None)  # urllib wraps the real error here
+        detail = str(reason if reason is not None else cause).strip()
+        return f"{self.code}: {type(cause).__name__}: {detail}" if detail else self.code

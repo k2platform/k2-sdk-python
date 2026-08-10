@@ -4,11 +4,13 @@ Run with: python -m pytest  (or: python tests/test_smoke.py)
 """
 import json
 import os
+import ssl
 import stat
 import sys
 import tempfile
 import threading
 import time
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -266,6 +268,24 @@ def test_outage_with_an_unusable_file_raises_the_files_own_code():
             "an unusable file must not be downgraded to K2_UNREACHABLE"
         assert "billing" in str(err) and "shipping" in str(err), "name both apps"
         assert "also unreachable" in str(err), "and state that the platform was gone too"
+
+
+def test_the_degraded_log_names_the_transport_failure_not_just_the_code():
+    """A TLS verification failure must not read as a plain outage.
+
+    ``K2_UNREACHABLE`` covers a DNS failure, a refused connection and a rejected certificate
+    alike. Logging the code alone reports a misconfiguration as an outage — and the file
+    fallback then hides it by succeeding. The reason is what tells them apart.
+    """
+    verify_failed = ssl.SSLCertVerificationError("certificate verify failed: self-signed certificate")
+    err = K2Error(K2ErrorCode.UNREACHABLE, "unreachable", -1,
+                  urllib.error.URLError(verify_failed))
+    assert err.outage_detail.startswith(K2ErrorCode.UNREACHABLE + ":"), "keep the code"
+    assert "certificate verify failed" in err.outage_detail, \
+        "a rejected certificate must be named, not folded into a bare K2_UNREACHABLE"
+
+    assert K2Error(K2ErrorCode.SERVER_ERROR, "5xx").outage_detail == K2ErrorCode.SERVER_ERROR, \
+        "with no cause to name, fall back to the bare code"
 
 
 def test_auth_failures_are_never_served_from_the_file():

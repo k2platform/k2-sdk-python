@@ -213,7 +213,7 @@ class K2Client:
                 hit = self._load_for_fallback(environment, e)
                 if hit is not None:
                     self._log(
-                        f"K2: {self.base_url} unreachable ({e.code}) — serving "
+                        f"K2: {self.base_url} unreachable ({e.outage_detail}) — serving "
                         f"{len(hit.properties)} keys for env '{environment}' from {hit.path} "
                         f"(written {human_age(hit.age_seconds)} ago)"
                     )
@@ -396,7 +396,8 @@ class K2Client:
         except K2Error as e:
             raise K2Error(
                 e.code,
-                f"{e}\nThe platform at {self.base_url} was also unreachable ({outage.code}), "
+                f"{e}\nThe platform at {self.base_url} was also unreachable "
+                f"({outage.outage_detail}), "
                 "so this file was the last-known-good the SDK tried to fall back to.",
                 e.status_code,
                 e,
