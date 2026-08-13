@@ -10,9 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.2.0] - 2026-08-12
 
 Cross-SDK parity: `K2_TOKEN_FILE` now works in all three K2 SDKs with identical semantics.
-Purely additive — a variable the SDK previously ignored.
+Purely additive — a variable the SDK previously ignored. Degraded-path logs also now name the
+underlying transport failure instead of the error code alone.
 
 ### Added
+
+- **`K2Error.outage_detail`** — a short `CODE: reason` string for logs, naming the underlying
+  transport failure when there was one, and falling back to the bare code when there is none
+  (a 5xx, say). The degraded paths — serving the local file, or reporting that the file was
+  unusable — previously logged the code alone, and `K2_UNREACHABLE` covers a DNS failure, a
+  refused connection and a TLS verification failure alike, so a certificate problem read as
+  "unreachable" with nothing to tell a misconfiguration apart from a genuine outage.
 
 - **`K2_TOKEN_FILE` / `token_file=`** — read the SDK token from a file instead of an environment
   variable, the `*_FILE` convention used by Docker secrets and Kubernetes secret mounts. The
