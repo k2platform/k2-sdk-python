@@ -19,7 +19,7 @@ from .kms_decrypt import kms_decrypt
 from .stream import ConfigStream
 from .sts_signer import aws_sts_signer
 
-SDK_VERSION = "python/1.1.0"
+SDK_VERSION = "python/1.2.0"
 DEFAULT_CACHE_TTL_SECONDS = 300.0
 
 
@@ -59,6 +59,7 @@ class K2Client:
         offline: bool = False,
         offline_cache: bool = True,
         hot_reload: Optional[bool] = None,
+        token_file: Optional[str] = None,
         token_enc: Optional[str] = None,
         token_decryptor: Optional[Callable[[str], str]] = None,
         org: Optional[str] = None,
@@ -102,6 +103,17 @@ class K2Client:
         )
         self.base_url = str(base_url).rstrip("/") if base_url else None
         self.token = token or None
+
+        # Credential precedence: explicit token → K2_TOKEN_FILE → K2_TOKEN_ENC. (K2_TOKEN is
+        # bound onto ``token`` by from_env, so it shares the first rung.)
+        #
+        # The file is read even in offline mode: naming an unreadable file is a
+        # misconfiguration worth reporting wherever it happens, and reading it costs one
+        # syscall. K2_TOKEN_ENC is different — decrypting it is a KMS round trip, so it stays
+        # lazy and offline mode, which is fully local, never reaches it.
+        if not self.token and token_file:
+            self.token = _read_token_file(token_file)
+
         self._token_enc = token_enc or None
         self._token_decryptor = token_decryptor or kms_decrypt
 
@@ -117,7 +129,8 @@ class K2Client:
             if not self.token and not self._token_enc and self.sts_signer is None:
                 raise K2Error(
                     K2ErrorCode.MISSING_TOKEN,
-                    "K2: no token configured. Set K2_TOKEN, or K2_TOKEN_ENC, or pass token=.\n"
+                    "K2: no token configured. Set K2_TOKEN, or K2_TOKEN_FILE, or K2_TOKEN_ENC, "
+                    "or pass token=.\n"
                     f"Reading from {self.base_url} needs a token minted in Admin → Tokens, "
                     "scoped to this app and environment.",
                 )
@@ -150,8 +163,8 @@ class K2Client:
     def from_env(cls, **overrides: Any) -> "K2Client":
         """Build from the ``K2_*`` environment variables, with keyword overrides.
 
-        Env: ``K2_BASE_URL``, ``K2_TOKEN``, ``K2_TOKEN_ENC``, ``K2_ENV``, ``K2_ORG``,
-        ``K2_APP``, ``K2_OFFLINE``, ``K2_OFFLINE_CACHE``, ``K2_HOT_RELOAD``,
+        Env: ``K2_BASE_URL``, ``K2_TOKEN``, ``K2_TOKEN_FILE``, ``K2_TOKEN_ENC``, ``K2_ENV``,
+        ``K2_ORG``, ``K2_APP``, ``K2_OFFLINE``, ``K2_OFFLINE_CACHE``, ``K2_HOT_RELOAD``,
         ``K2_CONFIG_DIR``, ``K2_CONFIG_FILE``, ``K2_OFFLINE_MAX_AGE``, ``K2_CACHE_TTL``,
         ``K2_STS_ENABLED``.
 
@@ -162,6 +175,7 @@ class K2Client:
         return cls(
             base_url=overrides.pop("base_url", e.get("K2_BASE_URL")),
             token=overrides.pop("token", e.get("K2_TOKEN")),
+            token_file=overrides.pop("token_file", e.get("K2_TOKEN_FILE")),
             token_enc=overrides.pop("token_enc", e.get("K2_TOKEN_ENC")),
             env=overrides.pop("env", e.get("K2_ENV")),
             org=overrides.pop("org", e.get("K2_ORG")),
@@ -443,7 +457,11 @@ class K2Client:
         return self.default_environment
 
     def _resolve_token(self) -> str:
-        """The effective token: explicit, or ``K2_TOKEN_ENC`` decrypted via KMS (once)."""
+        """The effective token: explicit, ``K2_TOKEN_FILE``, or ``K2_TOKEN_ENC`` (decrypted once).
+
+        The file rung is already resolved at construction — a named-but-unreadable secret mount
+        must break at boot, not on the first read an hour later.
+        """
         if self.token:
             return self.token
         if self._token_enc:
@@ -451,7 +469,8 @@ class K2Client:
             return self.token
         raise K2Error(
             K2ErrorCode.MISSING_TOKEN,
-            "K2: no token configured. Set K2_TOKEN, or K2_TOKEN_ENC, or pass token=.",
+            "K2: no token configured. Set K2_TOKEN, or K2_TOKEN_FILE, or K2_TOKEN_ENC, or "
+            "pass token=.",
         )
 
     def _current_path(self, environment: str) -> str:
@@ -576,6 +595,38 @@ class K2Client:
 def create_client(**kwargs: Any) -> K2Client:
     """Build a client from keyword args, falling back to the ``K2_*`` environment variables."""
     return K2Client.from_env(**kwargs)
+
+
+def _read_token_file(path: str) -> str:
+    """The token held in ``path``, stripped of surrounding whitespace.
+
+    Docker and Kubernetes secret mounts almost always end in a newline, and a token never has
+    meaningful surrounding whitespace, so the contents are stripped before use.
+
+    A file that cannot be read, or that is empty once stripped, is a
+    ``K2_TOKEN_FILE_UNREADABLE`` — never a silent fallthrough to "no token". The operator named
+    a file; if it does not hold a token, that is the failure worth reporting, not the generic
+    missing-token message it would otherwise become.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            contents = fh.read()
+    except OSError as e:
+        raise K2Error(
+            K2ErrorCode.TOKEN_FILE_UNREADABLE,
+            f"K2: the token file '{path}' could not be read ({e}).\n"
+            "K2_TOKEN_FILE must name a readable file containing the SDK token.",
+            -1,
+            e,
+        ) from e
+    token = contents.strip()
+    if not token:
+        raise K2Error(
+            K2ErrorCode.TOKEN_FILE_UNREADABLE,
+            f"K2: the token file '{path}' is empty.\n"
+            "K2_TOKEN_FILE must name a file containing the SDK token.",
+        )
+    return token
 
 
 def _resolve_offline(env: dict) -> bool:

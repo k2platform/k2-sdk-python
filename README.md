@@ -80,15 +80,17 @@ No CLI is needed for any of this: the SDK is the generator.
 ```json
 {
   "_k2": { "org": "acme", "app": "billing", "env": "prod",
-           "managed": true, "fetchedAt": "2026-08-03T18:04:11Z", "sdk": "python/1.1.0" },
+           "managed": true, "fetchedAt": "2026-08-03T18:04:11Z", "sdk": "python/1.2.0" },
   "properties": { "db.url": "postgresql://localhost:5432/billing", "db.pool": 20 }
 }
 ```
 
 Resolution order, first hit wins: `$K2_CONFIG_FILE` (alone, when set) → `./k2config-<env>.json`
-→ `$K2_CONFIG_DIR` or `~/.k2/config`. Naming an explicit location is **exclusive** — the
-machine default is not also consulted, so a stale file in your home directory can never quietly
-satisfy a read.
+→ `$K2_CONFIG_DIR` or `~/.k2/config`. Naming an explicit location is **exclusive of the machine
+default**: `K2_CONFIG_DIR` replaces `~/.k2/config` rather than preceding it, so a stale file in
+your home directory can never quietly satisfy a read. It does not suppress the working-directory
+candidate, which is always searched first — only `K2_CONFIG_FILE` does that. All three K2 SDKs
+order these identically.
 
 The app identity lives *inside* the file rather than in its name, which keeps `K2_APP` optional
 and gives you one predictable string to gitignore. Set `K2_APP` anyway: it is what turns
@@ -107,6 +109,7 @@ for `K2_UNREACHABLE`, `K2_TIMEOUT` and `K2_SERVER_ERROR` — the codes eligible 
 | Code | Means |
 |---|---|
 | `K2_MISSING_BASE_URL` / `K2_MISSING_TOKEN` / `K2_INVALID_MODE` | misconfiguration — raised at construction, not on first read |
+| `K2_TOKEN_FILE_UNREADABLE` | `K2_TOKEN_FILE` names a file that is missing, unreadable, or empty once stripped — never downgraded to `K2_MISSING_TOKEN` |
 | `K2_MISSING_ENV` | no environment passed and no `K2_ENV` — raised on read, since one client can serve several envs |
 | `K2_FILE_NOT_FOUND` | `K2_OFFLINE=true` and no file; the message lists every path searched |
 | `K2_FILE_MALFORMED` | the file isn't valid K2 JSON — a bug, not an outage, so no fallback to the server |
@@ -124,6 +127,7 @@ for `K2_UNREACHABLE`, `K2_TIMEOUT` and `K2_SERVER_ERROR` — the codes eligible 
 |---|---|
 | `K2_BASE_URL` | platform URL, e.g. `https://k2.acme.com` |
 | `K2_TOKEN` | SDK token (the one secret — never commit it) |
+| `K2_TOKEN_FILE` | path to a file holding the token — the Docker/Kubernetes secret-mount shape (**1.2.0+**) |
 | `K2_ENV` | default environment for the no-arg reads |
 | `K2_APP` | app slug — optional, but set it: it makes the file's app a checked invariant |
 | `K2_OFFLINE` | `true` ⇒ never contact the server (default `false`) |
@@ -136,6 +140,17 @@ for `K2_UNREACHABLE`, `K2_TIMEOUT` and `K2_SERVER_ERROR` — the codes eligible 
 
 `K2_OFFLINE=true` with `K2_OFFLINE_CACHE=false` is contradictory and raises `K2_INVALID_MODE`
 at construction.
+
+**Credential precedence:** an explicit `token=` argument → `K2_TOKEN` → `K2_TOKEN_FILE` →
+`K2_TOKEN_ENC`. A token file is stripped of surrounding whitespace (mounted secrets end in a
+newline) and read once, at token resolution — not per request. A missing, unreadable or blank
+file raises `K2_TOKEN_FILE_UNREADABLE` naming the path, never a silent fallthrough to "no token".
+`K2_TOKEN_FILE` is honoured from **1.2.0**; earlier versions ignore it.
+
+**Cross-language note:** the Java SDK raises `K2Exception` (not `K2Error`), classifies codes with
+a `K2ErrorCode.Kind` enum, adds `snapshot(env)` / `getOfflineCacheAllowed()`, and is not
+zero-dependency (Jackson). Codes and environment variables are identical across all three. See
+[USER_MANUAL.md → Cross-language differences](USER_MANUAL.md#12-cross-language-differences).
 
 **Deprecated, honored for one minor release** (each logs a WARN): `K2_SOURCE` → `K2_OFFLINE`
 (`file`→`true`, `server`→`false`, `auto`→`true` iff a file exists), and `K2_CACHE_DIR` →

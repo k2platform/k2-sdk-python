@@ -27,6 +27,7 @@ never phones anywhere else.
 9. [Hot reload](#9-hot-reload)
 10. [Environment variables & Docker](#10-environment-variables--docker)
 11. [Troubleshooting](#11-troubleshooting)
+12. [Cross-language differences](#12-cross-language-differences)
 
 ---
 
@@ -185,6 +186,7 @@ All options are constructor arguments of `K2Client` (and therefore of
 |---|---|---|---|
 | `base_url` | `str` | — (**required**) | Platform URL. Trailing slash is stripped. Empty/blank raises `K2Error`. Env: `K2_BASE_URL`. |
 | `token` | `str` | — (**required**) | SDK token used as `Authorization: Bearer` and `X-API-Token`. Empty raises `K2Error`. Env: `K2_TOKEN`. |
+| `token_file` | `str \| None` | `None` | Path to a file holding the token (Docker/Kubernetes secret mount). Used only when `token` is blank. Env: `K2_TOKEN_FILE`. See [credential resolution](#credential-resolution). |
 | `env` | `str \| None` | `None` | Default environment for the no-arg reads. If unset, no-arg reads raise `K2Error`. Env: `K2_ENV`. |
 | `request_timeout` | `float` | `10.0` | Per-request HTTP timeout in **seconds**. |
 | `cache_ttl_seconds` | `float \| None` | `None` | In-memory TTL (seconds) for `get_cached_configuration()`, and the `watch()` polling interval when the change stream is unavailable. `None`/`<=0` disables the TTL cache. |
@@ -281,7 +283,8 @@ deployment fails immediately rather than an hour later on the first read.
 | Code | Meaning |
 |---|---|
 | `K2_MISSING_BASE_URL` | no `base_url` and no `K2_BASE_URL` (and not `offline`) |
-| `K2_MISSING_TOKEN` | no `token`, `token_enc` or `sts` credential |
+| `K2_MISSING_TOKEN` | no `token`, `token_file`, `token_enc` or `sts` credential |
+| `K2_TOKEN_FILE_UNREADABLE` | `token_file` / `K2_TOKEN_FILE` names a file that is missing, unreadable, or empty once stripped. Never downgraded to `K2_MISSING_TOKEN` — the operator named a file, so the file is what the error reports |
 | `K2_INVALID_MODE` | `offline=True` with `offline_cache=False` — contradictory |
 | `K2_MISSING_ENV` | no environment passed and no `K2_ENV`. **Raised on read, not construction** — one client can legitimately serve several environments via `get_configuration(env)`, so requiring a default up front would break that API. |
 
@@ -306,7 +309,12 @@ server: a broken or foreign file is a bug to fix, not an outage to route around.
 | `K2_FORBIDDEN` | 403 | token has no access to that environment |
 | `K2_NOT_FOUND` | 404 | no config for that environment/key |
 | `K2_HOST_NOT_LICENSED` | 421 | `base_url` host doesn't match the platform's licensed host (`K2_PUBLIC_HOST`) |
-| `K2_REQUEST_FAILED` | other 4xx | an unexpected non-2xx; reachable and refusing, so still no fallback |
+
+**Other** — reachable and refusing, for a reason none of the above names.
+
+| Code | `status_code` | Meaning |
+|---|---|---|
+| `K2_REQUEST_FAILED` | an unexpected non-2xx (a 400 or 429, say) | the residual bucket. Like the auth codes it never serves the local file; **unlike** them it says nothing about your credential, so don't treat it as a token problem |
 
 **Availability** — the platform could not be reached. These, and only these, serve the local
 file when one is present.
@@ -335,7 +343,7 @@ One plaintext file per environment, serving both personas from §0:
     "env": "prod",
     "managed": true,
     "fetchedAt": "2026-08-03T18:04:11Z",
-    "sdk": "python/1.1.0"
+    "sdk": "python/1.2.0"
   },
   "properties": {
     "db.url": "postgresql://localhost:5432/billing",
@@ -359,11 +367,16 @@ $K2_CONFIG_FILE                     exact path — and nothing else is consulted
 $K2_CONFIG_DIR/k2config-<env>.json  or, when unset, ~/.k2/config/k2config-<env>.json
 ```
 
-**Naming an explicit location is exclusive.** `K2_CONFIG_FILE` means *that* file alone;
-setting `K2_CONFIG_DIR` replaces the `~/.k2/config` default rather than preceding it. A stale
-file in your home directory must never quietly satisfy a read that should have failed loudly.
-The repo-local path stays in the chain either way, because a repo is per-app and so can never
-hold a foreign app's file.
+**Naming an explicit location is exclusive of the machine default — not of the working
+directory.** `K2_CONFIG_FILE` means *that* file and nothing else. `K2_CONFIG_DIR` **replaces**
+`~/.k2/config` rather than preceding it, so a stale file in a home directory can never quietly
+satisfy a read that should have failed loudly — but it does **not** suppress
+`./k2config-<env>.json`, which is always searched first. Only `K2_CONFIG_FILE` does that. The
+repo-local candidate is kept deliberately: a repo is per-app, so it can't hold a foreign app's
+file. If your process's working directory might contain a `k2config-<env>.json` you don't want
+used, point `K2_CONFIG_FILE` at the exact file rather than setting a directory.
+
+All three K2 SDKs order these candidates identically.
 
 The SDK never *creates* a repo-local file — that is your deliberate `cp` (see below).
 
@@ -497,6 +510,7 @@ The SDK reads these environment variables (kwargs always override):
 |---|---|---|
 | `K2_BASE_URL` | Platform URL (`https://k2.acme.com`) | — (required unless passed) |
 | `K2_TOKEN` | SDK token — the one secret; never commit it | — (required unless passed) |
+| `K2_TOKEN_FILE` | Path to a file holding the token — the Docker/Kubernetes secret-mount shape. **Since 1.2.0** | — |
 | `K2_TOKEN_ENC` | KMS-encrypted token ciphertext, decrypted at first use | — |
 | `K2_ENV` | Default environment for no-arg reads | — |
 | `K2_ORG` / `K2_APP` | Org and app slugs | — |
@@ -515,6 +529,32 @@ The SDK reads these environment variables (kwargs always override):
 |---|---|---|
 | `K2_SOURCE` | `K2_OFFLINE` | `file`→`true`, `server`→`false`, `auto`→`true` iff a file exists for the env |
 | `K2_CACHE_DIR` | `K2_CONFIG_DIR` | direct |
+
+### Credential resolution
+
+The first of these that is set wins:
+
+1. `token=` passed to `K2Client` / `create_client` / `from_env`;
+2. `K2_TOKEN`;
+3. `K2_TOKEN_FILE` — **since 1.2.0**;
+4. `K2_TOKEN_ENC`.
+
+(`sts=` / `K2_STS_ENABLED` is a different mechanism — an AWS workload identity instead of a
+static token — and is not part of this chain.)
+
+`K2_TOKEN_FILE` exists for mounted secrets: Docker `secrets:`, a Kubernetes `Secret` mounted as a
+volume, or a Vault agent template. The file's contents are **stripped** of leading and trailing
+whitespace, so the trailing newline such a mount almost always carries is harmless. It is read
+**once**, when the client resolves its token — not per request — so rotating the file needs a
+restart or a fresh client.
+
+A path that is **missing, unreadable, or empty after stripping** raises
+`K2_TOKEN_FILE_UNREADABLE` naming the path. It never falls through silently to "no token": that
+would surface as `K2_MISSING_TOKEN` and point you at `K2_TOKEN`, which was never the problem.
+
+> On `keykosh-sdk` **1.1.x and earlier the variable is ignored entirely**, so an app relying on it
+> fails at construction with `K2_MISSING_TOKEN`. The Java and Node SDKs honour it from
+> `k2-sdk-java` 1.1.1 and `@keykosh/sdk` 1.2.0 respectively.
 
 ### Docker / 12-factor
 
@@ -548,7 +588,8 @@ docker run --rm \
 Notes:
 
 - **Never bake the token into the image** — inject `K2_TOKEN` at runtime (env, Docker secret,
-  or your orchestrator's secret store).
+  or your orchestrator's secret store). To keep it out of the process environment entirely,
+  mount it as a file and set `K2_TOKEN_FILE=/run/secrets/k2_token` instead (**1.2.0+**).
 - To make the offline file survive container restarts, mount a **volume** at
   `K2_CONFIG_DIR`. Without a persistent mount, each new container starts with no
   last-known-good config and a platform outage at boot has nothing to fall back to.
@@ -568,7 +609,8 @@ text.
 | Code / symptom | Likely cause | Fix |
 |---|---|---|
 | `K2_MISSING_BASE_URL` at construction | `base_url`/`K2_BASE_URL` empty | Set the platform URL. (Not needed with `offline=True`.) |
-| `K2_MISSING_TOKEN` at construction | `token`/`K2_TOKEN` empty | Mint a token in the admin UI → Tokens. |
+| `K2_MISSING_TOKEN` at construction | `token`/`K2_TOKEN` empty | Mint a token in the admin UI → Tokens. If `K2_TOKEN_FILE` *is* set, check the SDK version — 1.1.x ignores it. |
+| `K2_TOKEN_FILE_UNREADABLE` at construction | The path doesn't exist (Secret not mounted, or mounted elsewhere), the process can't read it (permissions / `runAsUser`), or it is blank | The error names the path — check the mount, the file mode, and that the Secret key isn't empty. |
 | `K2_INVALID_MODE` at construction | `offline=True` with `offline_cache=False` | Contradictory — offline mode *needs* a file. Drop one of the two. |
 | `K2_MISSING_ENV` on a read | No-arg read without `env` | Pass `env=…`, or call with an explicit environment. |
 | `K2_UNAUTHORIZED` / `K2_FORBIDDEN` | Wrong token, or the token isn't scoped to that env | Verify the token and its environment scope. |
@@ -599,3 +641,43 @@ Remember it holds secret values in clear on the token read path: keep it gitigno
 ```bash
 python tests/test_smoke.py   # no-network smoke tests (file store, errors, SSE)
 ```
+
+---
+
+## 12. Cross-language differences
+
+The three K2 SDKs — `keykosh-sdk` (Python), `@keykosh/sdk` (Node) and
+`com.k2platform:k2-sdk-java` — share one contract: the same environment variables, the same
+credential precedence, the same error **codes**, the same local file format and resolution order,
+and the same read endpoints. Env-var bootstrap is shared too: `create_client()` /
+`K2Client.from_env()` here, `createClient()` in Node, and `K2Client.fromEnv()` in Java (since
+1.1.1) read the same variable set. Five differences are deliberate and are not going to be
+reconciled, so check these before porting a snippet between languages.
+
+| | Python | Node | Java |
+|---|---|---|---|
+| Exception type | `K2Error` | `K2Error` | **`K2Exception`** |
+| Error-code classes | prose (§7) | prose | `K2ErrorCode.Kind` enum |
+| `snapshot(env)` — raw property map | — | — | ✅ |
+| `get_offline_cache_allowed()` | — | — | ✅ (`getOfflineCacheAllowed()`) |
+| Deprecated `K2_SOURCE` / `K2_CACHE_DIR` aliases | honoured (WARN) | honoured (WARN) | **not honoured** by `fromEnv()` |
+| Runtime dependencies | none | none | Jackson |
+
+- **Catch `K2Error` here, `K2Exception` on Java.** Renaming either would be a breaking change for
+  a cosmetic gain, so any cross-language instruction to "catch `K2Error`" is wrong in one of the
+  three. The `code` values are identical, so a runbook keyed on codes travels unchanged.
+- **There is no `Kind` enum in this SDK.** Java exposes `K2ErrorCode.kind()`
+  (`CONFIG`/`FILE`/`AUTH`/`AVAILABILITY`/`OTHER`); here the same grouping is documented in §7 and
+  the only programmatic split is `is_availability_error()` — the one that decides whether the
+  local file may be served. Branch on the code otherwise.
+- **`snapshot(env)` and `getOfflineCacheAllowed()` are Java-only.** `snapshot` returns the raw
+  property map that Java's Spring `PropertySource` layers in; use `cfg.to_dict()` for the
+  equivalent here. `getOfflineCacheAllowed()` reads a **vestigial** server response field (always
+  `true`; no SDK acts on it, and the offline file is available on every licence tier) — this
+  SDK's `K2Configuration` has no such attribute.
+- **This SDK honours the deprecated `K2_SOURCE` / `K2_CACHE_DIR` aliases; Java's `fromEnv()` does
+  not.** They still work here (with a WARN) for one more minor release. A container spec that
+  relies on them will not configure the Java SDK — move to `K2_OFFLINE` and `K2_CONFIG_DIR`, which
+  all three read.
+- **"Zero-dependency" describes this SDK and the Node one.** Java's core needs Jackson, so don't
+  carry the phrase across.

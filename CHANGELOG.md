@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-12
+
+Cross-SDK parity: `K2_TOKEN_FILE` now works in all three K2 SDKs with identical semantics.
+Purely additive — a variable the SDK previously ignored.
+
+### Added
+
+- **`K2_TOKEN_FILE` / `token_file=`** — read the SDK token from a file instead of an environment
+  variable, the `*_FILE` convention used by Docker secrets and Kubernetes secret mounts. The
+  file is read **once at construction** and stripped of surrounding whitespace, since a mounted
+  secret almost always ends in a newline. Credential precedence is
+  `token=` → `K2_TOKEN` → `K2_TOKEN_FILE` → `K2_TOKEN_ENC`.
+  This was previously documented as a language-neutral container pattern but implemented only
+  in the Java SDK's Spring integration; a Python deployment following that guidance got a hard
+  `K2_MISSING_TOKEN` at boot.
+- **`K2ErrorCode.TOKEN_FILE_UNREADABLE`** (`K2_TOKEN_FILE_UNREADABLE`). A named file that is
+  missing, unreadable, or empty once stripped raises it at construction, naming the path —
+  never a silent fallthrough to "no token". The operator named a file; if it does not hold a
+  token, that is the failure worth reporting, not the generic missing-token message it would
+  otherwise become.
+
+### Changed
+
+- The `K2_MISSING_TOKEN` message now lists `K2_TOKEN_FILE` alongside `K2_TOKEN` and
+  `K2_TOKEN_ENC`.
+
 ## [1.1.0] - 2026-08-03
 
 Offline modes and hot reload, per `OFFLINE_AND_HOTRELOAD_DESIGN.md`. No server upgrade is
@@ -87,6 +113,7 @@ required: against an older platform the change stream 404s and `watch()` polls i
   offline-cache-eligible.
 - `py.typed` marker — the package ships inline type hints (PEP 561).
 
-[Unreleased]: https://github.com/k2platform/k2-sdk-python/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/k2platform/k2-sdk-python/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/k2platform/k2-sdk-python/releases/tag/v1.2.0
 [1.1.0]: https://github.com/k2platform/k2-sdk-python/releases/tag/v1.1.0
 [1.0.0]: https://github.com/k2platform/k2-sdk-python/releases/tag/v1.0.0

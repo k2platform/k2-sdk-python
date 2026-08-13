@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "keykosh-sdk"
-version = "1.1.0"
+version = "1.2.0"
 description = "Client SDK for reading configuration from a self-hosted KeyKosh (K2) platform — token-scoped reads, SSE hot reload, and a plaintext offline config file."
 readme = "README.md"
 requires-python = ">=3.9"

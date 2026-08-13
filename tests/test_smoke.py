@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from keykosh import (  # noqa: E402
-    K2Client, K2ConfigStore, K2Configuration, K2Error, K2ErrorCode,
+    K2Client, K2ConfigStore, K2Configuration, K2Error, K2ErrorCode, create_client,
 )
 
 QUIET = lambda _line: None  # noqa: E731 — keep the test output clean
@@ -154,6 +154,76 @@ def test_missing_base_url_and_token_fail_at_construction():
     assert _raises(lambda: K2Client(token="t")).code == K2ErrorCode.MISSING_BASE_URL
     assert _raises(lambda: K2Client(base_url="http://x")).code == K2ErrorCode.MISSING_TOKEN
     assert K2Client(base_url="http://localhost:8080/", token="t").base_url == "http://localhost:8080"
+
+
+def test_token_file_is_read_at_construction_and_stripped():
+    with tempfile.TemporaryDirectory() as d:
+        secret = os.path.join(d, "k2_token")
+        # A mounted secret almost always ends in a newline; a token never has meaningful
+        # surrounding whitespace, so the file contents are stripped before use.
+        with open(secret, "w") as f:
+            f.write("  k2_live_from_file\n")
+        client = K2Client(base_url="http://x", token_file=secret, offline_cache=False)
+        assert client.token == "k2_live_from_file"
+
+
+def test_credential_precedence_token_then_file_then_enc():
+    with tempfile.TemporaryDirectory() as d:
+        secret = os.path.join(d, "k2_token")
+        with open(secret, "w") as f:
+            f.write("k2_live_from_file\n")
+
+        explicit = K2Client(base_url="http://x", token="tok_explicit", token_file=secret,
+                            token_enc="Y2lwaGVy", offline_cache=False)
+        assert explicit.token == "tok_explicit", "an explicit token wins over the file"
+
+        decrypted = []
+        over_enc = K2Client(base_url="http://x", token_file=secret, token_enc="Y2lwaGVy",
+                            offline_cache=False,
+                            token_decryptor=lambda ct: decrypted.append(ct) or "x")
+        assert over_enc.token == "k2_live_from_file", "the file wins over K2_TOKEN_ENC"
+        assert over_enc._resolve_token() == "k2_live_from_file"
+        assert not decrypted, "and the KMS round trip is never made"
+
+        env = {"K2_BASE_URL": "http://x", "K2_TOKEN": "tok_env", "K2_TOKEN_FILE": secret}
+        saved = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+        try:
+            assert create_client(offline_cache=False).token == "tok_env", \
+                "K2_TOKEN wins over K2_TOKEN_FILE"
+            del os.environ["K2_TOKEN"]
+            assert create_client(offline_cache=False).token == "k2_live_from_file", \
+                "K2_TOKEN_FILE is read by from_env when K2_TOKEN is unset"
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+def test_unreadable_or_empty_token_file_raises_its_own_code():
+    with tempfile.TemporaryDirectory() as d:
+        # A named file that holds no token must say so. Falling through to the generic
+        # K2_MISSING_TOKEN would hide the actual fault: the mount is wrong, not absent.
+        missing = os.path.join(d, "nope")
+        err = _raises(lambda: K2Client(base_url="http://x", token_file=missing, offline_cache=False))
+        assert err.code == K2ErrorCode.TOKEN_FILE_UNREADABLE
+        assert missing in str(err), "the message names the path"
+        assert "K2_TOKEN_FILE" in str(err), "and the variable"
+
+        blank = os.path.join(d, "blank")
+        with open(blank, "w") as f:
+            f.write("\n  \n")
+        empty = _raises(lambda: K2Client(base_url="http://x", token_file=blank, offline_cache=False))
+        assert empty.code == K2ErrorCode.TOKEN_FILE_UNREADABLE, "empty once stripped is unreadable"
+        assert "empty" in str(empty), "and says which of the two it was"
+
+
+def test_missing_token_message_names_the_token_file():
+    err = _raises(lambda: K2Client(base_url="http://x"))
+    assert err.code == K2ErrorCode.MISSING_TOKEN
+    assert "K2_TOKEN_FILE" in str(err), "the message must offer the file as an option"
 
 
 def test_missing_env_raises_its_own_code():
